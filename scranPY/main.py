@@ -214,164 +214,186 @@ def process_cluster(args):
         print('Not all size factors for clust = ', clust, 'are greater than 0. Cleaning size factors.')
         final_nf = clean_size_factors(final_nf, cur_exprs.sum(axis=1))
     return final_nf, ave_cell, np.mean(cur_libs)
-    
 
-def compute_sum_factors(adata=AnnData, sizes=np.arange(21, 102, 5), clusters=None, min_mean=None, max_size=3000, parallelize=True, algorithm='CVXPY', stopwatch=True, plotting=True, lower_bound=0.1, normalize_counts=False, log1p=False, layer='scranPY', save_plots_dir=None):
-    if sp.sparse.issparse(adata.X):
-        raise ValueError("The input data is a sparse matrix which is not currently compatible. Convert your expression matrix to a dense array using: 'adata.X = adata.X.toarray()'")
-        
+def normalize_exprs_sparse(X, lib_sizes):
+    """
+    Normalize CSR or dense matrix by library sizes along rows.
+    X: shape (n_cells, n_genes)
+    lib_sizes: shape (n_cells,)
+    """
+    import scipy.sparse as sp
+    lib_sizes = np.asarray(lib_sizes).ravel()  # shape (n_cells,)
+    
+    if sp.issparse(X):
+        # CSR multiply broadcasts along rows safely as a 1D array
+        if not sp.isspmatrix_csr(X):
+            X = X.tocsr()
+        return X.multiply(1.0 / lib_sizes)  # <--- pass 1D array, NOT [:, None]
+    else:
+        return X / lib_sizes[:, None]  # dense still needs [:, None]
+
+def compute_sum_factors(
+    adata=AnnData,
+    sizes=np.arange(21, 102, 5),
+    clusters=None,
+    min_mean=None,
+    max_size=3000,
+    parallelize=True,
+    algorithm='CVXPY',
+    stopwatch=True,
+    plotting=True,
+    lower_bound=0.1,
+    normalize_counts=False,
+    log1p=False,
+    layer='scranPY',
+    save_plots_dir=None
+):
+
     start_time = time.time()
+
+    import scipy.sparse as sp
+
+    # ------------------------------------------------------------------
+    # Handle sparse safely
+    # ------------------------------------------------------------------
+    X = adata.X
+    is_sparse = sp.issparse(X)
+
+    if is_sparse:
+        X = X.tocsr()
+
+    # ------------------------------------------------------------------
+    # Clustering setup
+    # ------------------------------------------------------------------
     if clusters is None:
-        clusters = pd.Series(['temp'] * adata.X.shape[0], dtype='category')
+        clusters = pd.Series(['temp'] * X.shape[0], dtype='category')
         clusters.index = adata.obs_names
         print('Clusters is set to None')
     else:
         clusters = adata.obs[clusters].astype('category')
         print('Current smallest cluster = ', clusters.value_counts().min(),' cells.')
 
-    if clusters.value_counts().min() < sizes.max(): 
-        if 41 > clusters.value_counts().min(): ## we want at least 5 pool sizes to compare with
+    if clusters.value_counts().min() < sizes.max():
+        if 41 > clusters.value_counts().min():
             if 30 > clusters.value_counts().min():
                 raise ValueError("You're passing a cluster that is too small. Minimum size is 30 cells.")
             else:
-                print("Warning: you're passing a very small cluster that contains 40 or less cells. Pool sizes have been readjusted.")
+                print("Warning: small cluster (<=40 cells). Adjusting pool sizes.")
                 sizes=np.arange(11, clusters.value_counts().min(), 5)
-                sizes = np.array(sizes, dtype=int)
         else:
-            print("Warning: you're passing a small cluster that contains less than 100 cells. Pool sizes have been readjusted.")
+            print("Warning: cluster <100 cells. Adjusting pool sizes.")
             sizes=np.arange(21, clusters.value_counts().min(), 5)
-            sizes = np.array(sizes, dtype=int)
-    else:
-        sizes = np.array(sizes, dtype=int)
-        
-    ncells = adata.X.shape[0] ##1
+    sizes = np.array(sizes, dtype=int)
+
+    ncells = X.shape[0]
+
     if max_size is not None:
         clusters = limit_cluster_size(clusters, max_size=max_size)
 
     indices = [np.where(clusters == c)[0] for c in np.unique(clusters)]
-        
-    print('Using max_size = ',max_size, ', clusters have been split into ', len(indices), ' clusters.')
-    lib_sizes = np.sum(adata.X, axis=1) ##3
-    lib_sizes = lib_sizes / np.mean(lib_sizes) 
-    exprs = adata.X.multiply(1.0 / lib_sizes[:, None]) # fix shape issue #exprs = (adata.X.T / lib_sizes).T ##4
-    min_mean = guess_min_mean(adata.X, min_mean=min_mean) ##5
-    print('min_mean = ', min_mean)
-    clust_nf, clust_profile, clust_libsize = [], [], []
-    warned_size, warned_neg = False, False
-    
-    if parallelize==True:
-        with mp.Pool() as pool:
-            results = []
-            for i, result in enumerate(pool.imap(process_cluster, [(clust, indices, exprs, lib_sizes, min_mean, sizes, algorithm, lower_bound) for clust in range(len(indices))])):
-                results.append((i, result))
-            results.sort(key=lambda x: x[0])
-            for _, result in results:
-                final_nf, ave_cell, mean_lib = result
-                clust_nf.append(final_nf)
-                clust_profile.append(ave_cell)
-                clust_libsize.append(mean_lib)
-    else:
-        for clust in range(len(indices)):
-            curdex = indices[clust]
-            cur_exprs = exprs[curdex]
-            cur_libs = lib_sizes[curdex]
-            cur_cells = len(curdex)
-            ave_cell = np.mean(cur_exprs, axis=0)*np.mean(cur_libs)
-            high_ave = min_mean <= ave_cell
-            use_ave_cell = ave_cell
-            if not all(high_ave):
-                cur_exprs = cur_exprs[:,high_ave]
-                use_ave_cell = use_ave_cell[high_ave]
-            ngenes = np.sum(high_ave)
-            sphere = generate_sphere(cur_libs)
-            sizes = sizes[sizes <= exprs.shape[0]]
-            design, output = _create_linear_system(ngenes, cur_cells, cur_exprs, sphere, sizes, use_ave_cell)
-            if algorithm=='QR':
-                final_nf = QR_decomposition(design, output)
-            if algorithm=='CVXPY':
-                final_nf = solve_quadratic_cvxpy(design.T, output, cur_cells, lower_bound)
-            if all(final_nf > 0) == False:
-                print('Not all size factors for clust = ', clust, 'are greater than 0. Cleaning size factors.')
-                final_nf = clean_size_factors(final_nf, cur_exprs.sum(axis=1))
-            clust_nf.append(final_nf)
-            clust_profile.append(ave_cell)
-            clust_libsize.append(np.mean(cur_libs))
-        
-    non_zeroes = np.array([np.sum(x > 0) for x in clust_profile])
-    ref_col = np.argmax(non_zeroes)  
+    print('Using max_size = ',max_size, ', clusters split into ', len(indices), ' clusters.')
 
-    rescaling_factors = rescale_clusters(mean_prof=clust_profile, ref_col=ref_col, min_mean=min_mean)
+    # ------------------------------------------------------------------
+    # Library size normalization (SPARSE SAFE)
+    # ------------------------------------------------------------------
+    lib_sizes = np.asarray(X.sum(axis=1)).ravel()
+    lib_sizes = lib_sizes / np.mean(lib_sizes)
+
+    exprs = normalize_exprs_sparse(X, lib_sizes)
+
+    min_mean = guess_min_mean(X, min_mean=min_mean)
+    print('min_mean = ', min_mean)
+
+    clust_nf, clust_profile, clust_libsize = [], [], []
+
+    # ------------------------------------------------------------------
+    # Cluster processing
+    # ------------------------------------------------------------------
     for clust in range(len(indices)):
-            clust_nf[clust] = clust_nf[clust] * rescaling_factors[clust]
-    
+        curdex = indices[clust]
+        cur_exprs = exprs[curdex]
+        cur_libs = lib_sizes[curdex]
+        cur_cells = len(curdex)
+
+        # Convert to dense ONLY here (linear system requires dense)
+        if sp.issparse(cur_exprs):
+            cur_exprs = cur_exprs.toarray()
+
+        ave_cell = np.mean(cur_exprs, axis=0) * np.mean(cur_libs)
+        high_ave = min_mean <= ave_cell
+        use_ave_cell = ave_cell
+
+        if not all(high_ave):
+            cur_exprs = cur_exprs[:,high_ave]
+            use_ave_cell = use_ave_cell[high_ave]
+
+        ngenes = np.sum(high_ave)
+
+        sphere = generate_sphere(cur_libs)
+        sizes = sizes[sizes <= cur_cells]
+
+        design, output = _create_linear_system(
+            ngenes, cur_cells, cur_exprs, sphere, sizes, use_ave_cell
+        )
+
+        if algorithm=='QR':
+            final_nf = QR_decomposition(design, output)
+        if algorithm=='CVXPY':
+            final_nf = solve_quadratic_cvxpy(design.T, output, cur_cells, lower_bound)
+
+        if not all(final_nf > 0):
+            print('Cleaning negative size factors for cluster', clust)
+            final_nf = clean_size_factors(final_nf, cur_exprs.sum(axis=1))
+
+        clust_nf.append(final_nf)
+        clust_profile.append(ave_cell)
+        clust_libsize.append(np.mean(cur_libs))
+
+    # ------------------------------------------------------------------
+    # Rescaling across clusters
+    # ------------------------------------------------------------------
+    non_zeroes = np.array([np.sum(x > 0) for x in clust_profile])
+    ref_col = np.argmax(non_zeroes)
+
+    rescaling_factors = rescale_clusters(
+        mean_prof=clust_profile,
+        ref_col=ref_col,
+        min_mean=min_mean
+    )
+
+    for clust in range(len(indices)):
+        clust_nf[clust] *= rescaling_factors[clust]
+
     final_sf = np.full(ncells, np.nan)
     final_sf[np.concatenate(indices)] = np.concatenate(clust_nf)
     final_sf = final_sf * lib_sizes
+
     is_pos = (final_sf > 0) & (~np.isnan(final_sf))
-    final_sf = final_sf/np.mean(final_sf[is_pos])
-    
-    if stopwatch == True:
+    final_sf = final_sf / np.mean(final_sf[is_pos])
+
+    if stopwatch:
         print('---',round((time.time() - start_time)/60, 2),'mins ---')
-    
+
     adata.obs['size_factors'] = final_sf
-    print('size factor min = ', adata.obs['size_factors'].min())
-    print('size factor max = ', adata.obs['size_factors'].max())
+    print('size factor min = ', final_sf.min())
+    print('size factor max = ', final_sf.max())
 
-    if plotting == True:
-        import matplotlib.pyplot as plt
-        from matplotlib import gridspec
-        from matplotlib.cm import ScalarMappable
-        
-        fig = plt.figure(figsize=(14, 3))
-        gs = gridspec.GridSpec(1, 4, width_ratios=[10, 10, 9, 1])
+    # ------------------------------------------------------------------
+    # Normalize counts (SPARSE SAFE)
+    # ------------------------------------------------------------------
+    if normalize_counts:
+        print('Normalizing adata.X by size factors')
 
-        adata.obs[' Total Transcripts '] = adata.X.sum(1)
-        adata.obs[' Total Genes '] = (adata.X > 0).sum(1)
-        adata.obs[' log(Total Transcripts) '] = np.log(adata.X.sum(1))
-        adata.obs[' log(Total Genes) '] = np.log((adata.X > 0).sum(1))
+        if is_sparse:
+            adata.X = adata.X.multiply(1.0 / final_sf[:, None])
+        else:
+            adata.X /= final_sf[:,None]
 
-        ax1 = plt.subplot(gs[0])
-        ax2 = plt.subplot(gs[1])
-        ax3 = plt.subplot(gs[2])
-        cax = plt.subplot(gs[3])
-        p1 = sc.pl.scatter(adata, x='size_factors', y=' Total Transcripts ', show=False, ax=ax1)
-        p2 = sc.pl.scatter(adata, x='size_factors', y=' Total Genes ', show=False, ax=ax2)
-        p3 = sc.pl.scatter(adata, x=' log(Total Genes) ', y=' log(Total Transcripts) ', 
-                        color='size_factors', color_map='turbo', show=False, ax=ax3)
-                        
-        del adata.obs[' Total Transcripts ']
-        del adata.obs[' Total Genes ']
-        del adata.obs[' log(Total Transcripts) ']
-        del adata.obs[' log(Total Genes) ']
-
-        cmap = plt.get_cmap('turbo')
-        norm = plt.Normalize(vmin=p3.collections[0].get_array().min(), vmax=p3.collections[0].get_array().max())
-        sm = ScalarMappable(cmap=cmap, norm=norm)
-        sm.set_array([])
-        plt.subplots_adjust(wspace=0.75)
-        plt.colorbar(sm, cax=cax)
-        p3.collections[0].colorbar.remove()
-        cax_pos = cax.get_position()
-        cax.set_position([cax_pos.x0 - 0.08, cax_pos.y0, cax_pos.width, cax_pos.height])
-        if save_plots_dir is not None:
-            plt.savefig(save_plots_dir + '/scranPY_normalization.pdf', bbox_inches="tight", dpi=300) 
-            temp = save_plots_dir + '/scranPY_normalization.pdf'
-            print('Saved plots to:',temp)
-            del temp
-            
-        plt.show()
-        plt.clf()
-    
-    if normalize_counts == True:
-        print('Normalizing active adata.X matrix by dividing counts by size factors')
-        adata.X /= adata.obs['size_factors'].values[:,None]
-        if log1p == True:
-            print('Transforming normalized adata.X using natural log +1')
+        if log1p:
             sc.settings.verbosity = 0
             sc.pp.log1p(adata)
-            
-    if (normalize_counts == True) & (layer is not None):
-        print("Storing normalized (and log transformed if 'log1p=True') adata.X as layer =",layer)
-        adata.layers[layer] = adata.X.copy() 
+
+    if normalize_counts and layer is not None:
+        adata.layers[layer] = adata.X.copy()
 
     return final_sf
