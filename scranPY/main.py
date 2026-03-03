@@ -253,7 +253,7 @@ def compute_sum_factors(adata=AnnData, sizes=np.arange(21, 102, 5), clusters=Non
     print('Using max_size = ',max_size, ', clusters have been split into ', len(indices), ' clusters.')
     lib_sizes = np.sum(adata.X, axis=1) ##3
     lib_sizes = lib_sizes / np.mean(lib_sizes) 
-    exprs = (adata.X.T / lib_sizes).T ##4
+    exprs = adata.X.multiply(1.0 / lib_sizes[:, None]) # fix shape issue #exprs = (adata.X.T / lib_sizes).T ##4
     min_mean = guess_min_mean(adata.X, min_mean=min_mean) ##5
     print('min_mean = ', min_mean)
     clust_nf, clust_profile, clust_libsize = [], [], []
