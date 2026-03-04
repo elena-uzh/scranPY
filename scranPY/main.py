@@ -11,6 +11,9 @@ import time
 
 
 def _create_linear_system(ngenes, cur_cells, cur_exprs, sphere, sizes, use_ave_cell):
+    if ngenes == 0:
+        raise ValueError("No genes passed the min_mean filter.")
+    row_dex, col_dex, output = [], [], []
     row_dex, col_dex, output = [], [], []
     last_row = 0
     for si in range(len(sizes)):

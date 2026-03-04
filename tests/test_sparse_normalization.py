@@ -4,26 +4,26 @@ import anndata as ad
 import scranPY
 
 
-def test_sparse_normalization_shape_with_no_genes_passing_filter():
-    # Create fake count matrix (cells x genes)
+def test_no_genes_pass_filtering():
     n_cells = 100
     n_genes = 200
 
+    # Very sparse low-count data so no genes pass min_mean filter
+    np.random.seed(42)
     X = sp.random(n_cells, n_genes, density=0.05, format="csr")
     adata = ad.AnnData(X)
-
     adata.obs["groups"] = ["A"] * n_cells
 
-    # Should not raise shape errors
-    scranPY.compute_sum_factors(
-        adata,
-        clusters="groups",
-        parallelize=False,
-        algorithm="CVXPY",
-        max_size=3000,
-        plotting=False,
-        normalize_counts=False
-    )
+    with pytest.raises(ValueError, match="No genes passed the min_mean filter."):
+        scranPY.compute_sum_factors(
+            adata,
+            clusters="groups",
+            parallelize=False,
+            algorithm="CVXPY",
+            max_size=3000,
+            plotting=False,
+            normalize_counts=False
+        )
 
 def test_sparse_normalization_shape():
     n_cells = 100
