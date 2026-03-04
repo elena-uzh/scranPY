@@ -38,6 +38,8 @@ def _create_linear_system(ngenes, cur_cells, cur_exprs, sphere, sizes, use_ave_c
 def forge_system(ng, nc, exprs, ordering, size, ref):
     ncells = int(nc)
     ngenes = int(ng)
+    if ngenes == 0:
+        return "Error: no genes passed filter"
     orptr = ordering
     SIZE = int(size)
     rptr = np.asarray(ref, dtype=float)
@@ -325,6 +327,12 @@ def compute_sum_factors(
             use_ave_cell = use_ave_cell[high_ave]
 
         ngenes = np.sum(high_ave)
+
+        if ngenes == 0:
+            print(f'Warning: no genes passed min_mean filter for cluster {clust}. Lowering min_mean threshold.')
+            high_ave = np.ones(cur_exprs.shape[1], dtype=bool)
+            use_ave_cell = ave_cell
+            ngenes = cur_exprs.shape[1]
 
         sphere = generate_sphere(cur_libs)
         sizes = sizes[sizes <= cur_cells]
