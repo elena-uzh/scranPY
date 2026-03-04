@@ -141,7 +141,7 @@ def generate_sphere(lib_sizes):
 
 def guess_min_mean(x, min_mean=None):
     if min_mean is None:
-        mid_lib = np.median(np.sum(x, axis=0))
+        mid_lib = float(np.median(np.asarray(x.sum(axis=0)).ravel()))  # flatten to 1D first
         if np.isnan(mid_lib):
             min_mean = 1
         elif mid_lib <= 50000:
