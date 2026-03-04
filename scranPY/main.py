@@ -216,21 +216,18 @@ def process_cluster(args):
     return final_nf, ave_cell, np.mean(cur_libs)
 
 def normalize_exprs_sparse(X, lib_sizes):
-    """
-    Normalize CSR or dense matrix by library sizes along rows.
-    X: shape (n_cells, n_genes)
-    lib_sizes: shape (n_cells,)
-    """
     import scipy.sparse as sp
-    lib_sizes = np.asarray(lib_sizes).ravel()  # shape (n_cells,)
+    lib_sizes = np.asarray(lib_sizes).ravel()
     
     if sp.issparse(X):
-        # CSR multiply broadcasts along rows safely as a 1D array
         if not sp.isspmatrix_csr(X):
             X = X.tocsr()
-        return X.multiply(1.0 / lib_sizes)  # <--- pass 1D array, NOT [:, None]
+        # Use diags to create a diagonal scaling matrix, then left-multiply
+        # This scales each row i by 1/lib_sizes[i], no broadcasting needed
+        scaler = sp.diags(1.0 / lib_sizes)  # shape (n_cells, n_cells)
+        return scaler @ X  # (n_cells, n_cells) @ (n_cells, n_genes) = (n_cells, n_genes)
     else:
-        return X / lib_sizes[:, None]  # dense still needs [:, None]
+        return X / lib_sizes[:, None]
 
 def compute_sum_factors(
     adata=AnnData,
